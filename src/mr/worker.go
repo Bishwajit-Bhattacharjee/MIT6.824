@@ -79,13 +79,15 @@ func handleMap(args ArgsFromWorker, reply ReplyFromMaster,mapf func(string, stri
 	defer file.Close()
 	mapId := reply.TaskNum
 
-	files := make([]*os.File, nReduce)
+	files := make([]*os.File, nReduce) // temp files
+	tempFileNames := make([]string, nReduce)
 
 	for i := 0; i < nReduce; i++ {
-		name := "mr" + "-" + strconv.Itoa(mapId) + "-" + strconv.Itoa(i)
+		//name := "mr" + "-" + strconv.Itoa(mapId) + "-" + strconv.Itoa(i)
 
-		files[i],_ = os.Create(name)
-		defer files[i].Close()
+		files[i],_ = ioutil.TempFile(".", "mapTemp")
+		tempFileNames[i] = files[i].Name()
+		//defer files[i].Close()
 	}
 
 	if err != nil {
@@ -107,6 +109,16 @@ func handleMap(args ArgsFromWorker, reply ReplyFromMaster,mapf func(string, stri
 		if err != nil {
 			fmt.Println("Error while writing json!")
 		}
+	}
+
+
+	for i := 0; i < nReduce; i++ {
+		files[i].Close()
+	}
+
+	for i := 0; i < nReduce; i++ {
+		name := "mr" + "-" + strconv.Itoa(mapId) + "-" + strconv.Itoa(i)
+		os.Rename(tempFileNames[i], name)
 	}
 
 //	fmt.Printf("Completed Map %v\n", mapId)
@@ -132,13 +144,6 @@ func handleReduce(args ArgsFromWorker, reply ReplyFromMaster, reducef func(strin
 
 	reduceFileNames ,_ := filepath.Glob("mr-*-" + strconv.Itoa(reduceId))
 
-//	fmt.Printf("Reduce files for task %v\n", reduceId)
-//	for _, fileName := range reduceFileNames {
-//		fmt.Println(fileName)
-//	}
-//	fmt.Println()
-//
-
 	intermediate := []KeyValue{}
 	for _, filename := range reduceFileNames {
 		file, err := os.Open(filename)
@@ -159,7 +164,8 @@ func handleReduce(args ArgsFromWorker, reply ReplyFromMaster, reducef func(strin
 	sort.Sort(ByKey(intermediate))
 
 	oname := "mr-out-" + strconv.Itoa(reduceId)
-	ofile, _ := os.Create(oname)
+	ofile, _ := ioutil.TempFile(".", "reduce")
+	tmpName := ofile.Name()
 
 	i := 0
 	for i < len(intermediate) {
@@ -178,8 +184,10 @@ func handleReduce(args ArgsFromWorker, reply ReplyFromMaster, reducef func(strin
 
 		i = j
 	}
-
 	ofile.Close()
+
+	os.Rename(tmpName, oname)
+
 	call("Master.CompletedTask", &args1, &reply1)
 }
 
