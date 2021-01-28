@@ -1,11 +1,27 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"time"
+	//"encoding/json"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
 
+// for sorting by key.
+type ByKey []KeyValue
 
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 //
 // Map functions return a slice of KeyValue.
 //
@@ -31,34 +47,146 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
-	// Your worker implementation here.
+	for {
+		time.Sleep(20 * time.Millisecond)
+		args := ArgsFromWorker{}
+		reply := ReplyFromMaster{}
 
-	// uncomment to send the Example RPC to the master.
-	// CallExample()
+		found := AskForTask(&args, &reply)
+
+		if !found {
+			fmt.Println("ending!")
+			break
+		}
+
+		if reply.TaskType == "Map" {
+			handleMap(args, reply, mapf)
+		} else if reply.TaskType == "Reduce" {
+			handleReduce(args, reply, reducef)
+		} else if reply.TaskType == "Die" {
+			break
+		}
+	}
 
 }
 
+func handleMap(args ArgsFromWorker, reply ReplyFromMaster,mapf func(string, string)[]KeyValue) {
+
+	filename := reply.FileName
+	nReduce := reply.NumReduce
+
+	file, err := os.Open(filename)
+	defer file.Close()
+	mapId := reply.TaskNum
+
+	files := make([]*os.File, nReduce)
+
+	for i := 0; i < nReduce; i++ {
+		name := "mr" + "-" + strconv.Itoa(mapId) + "-" + strconv.Itoa(i)
+
+		files[i],_ = os.Create(name)
+		defer files[i].Close()
+	}
+
+	if err != nil {
+		log.Fatalf("cannot open %v", filename)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", filename)
+	}
+	kva := mapf(filename, string(content))
+
+//	fmt.Println("map Task: " + strconv.Itoa(mapId))
+//	fmt.Println("sz " + strconv.Itoa(len(kva)))
+
+	for _, kv := range kva {
+		rBucket := ihash(kv.Key) % nReduce
+		enc := json.NewEncoder(files[rBucket])
+		err := enc.Encode(&kv)
+		if err != nil {
+			fmt.Println("Error while writing json!")
+		}
+	}
+
+//	fmt.Printf("Completed Map %v\n", mapId)
+//
+	args1 := ArgsFromWorker{TaskType: "Map", TaskNum: mapId}
+	reply1 := ReplyFromMaster{}
+
+	call("Master.CompletedTask", &args1, &reply1)
+	// tell the master you have completed it
+}
 //
 // example function to show how to make an RPC call to the master.
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func CallExample() {
 
-	// declare an argument structure.
-	args := ExampleArgs{}
+func handleReduce(args ArgsFromWorker, reply ReplyFromMaster, reducef func(string, []string)string){
+	reduceId := reply.TaskNum
+	fmt.Println("Working on Reduce No " + strconv.Itoa(reduceId))
 
-	// fill in the argument(s).
-	args.X = 99
+	args1 := ArgsFromWorker{TaskType: "Reduce", TaskNum: reduceId}
+	reply1 := ReplyFromMaster{}
 
-	// declare a reply structure.
-	reply := ExampleReply{}
+	reduceFileNames ,_ := filepath.Glob("mr-*-" + strconv.Itoa(reduceId))
 
-	// send the RPC request, wait for the reply.
-	call("Master.Example", &args, &reply)
+//	fmt.Printf("Reduce files for task %v\n", reduceId)
+//	for _, fileName := range reduceFileNames {
+//		fmt.Println(fileName)
+//	}
+//	fmt.Println()
+//
 
-	// reply.Y should be 100.
-	fmt.Printf("reply.Y %v\n", reply.Y)
+	intermediate := []KeyValue{}
+	for _, filename := range reduceFileNames {
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open %v", filename)
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+		file.Close()
+	}
+
+	sort.Sort(ByKey(intermediate))
+
+	oname := "mr-out-" + strconv.Itoa(reduceId)
+	ofile, _ := os.Create(oname)
+
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+
+	ofile.Close()
+	call("Master.CompletedTask", &args1, &reply1)
+}
+
+
+func AskForTask(args *ArgsFromWorker, reply *ReplyFromMaster) bool {
+
+	return call("Master.AllotTask", args, reply)
 }
 
 //
