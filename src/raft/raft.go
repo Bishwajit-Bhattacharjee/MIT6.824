@@ -285,8 +285,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	leaderPrevTerm := args.PrevLogTerm
 
 	if leaderPrevIndex >= 0 {
-		if leaderPrevIndex >= len(rf.log) ||
-			rf.log[leaderPrevIndex].Term != leaderPrevTerm {
+		if leaderPrevIndex >= len(rf.log) {
+			reply.ConflictIndex = len(rf.log)
+			reply.Success = false
+			return
+		} else if rf.log[leaderPrevIndex].Term != leaderPrevTerm {
+			conflictingTerm := rf.log[leaderPrevIndex].Term
+			pos := leaderPrevIndex
+			for pos >= 0 && rf.log[pos].Term == conflictingTerm {
+				pos--
+			}
+			reply.ConflictIndex = pos + 1
 			reply.Success = false
 			return
 		}
@@ -639,7 +648,7 @@ func (rf *Raft) sendHeartBeatToOne(server, term int)  {
 			rf.mu.Unlock()
 			break
 		} else {
-			rf.nextIndex[server]--
+			rf.nextIndex[server] = reply.ConflictIndex
 			rf.mu.Unlock()
 		}
 	}
@@ -671,7 +680,7 @@ func (rf *Raft) updateLeaderCommitIndex() {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(10* time.Millisecond)
+		time.Sleep(30* time.Millisecond)
 	}
 }
 
