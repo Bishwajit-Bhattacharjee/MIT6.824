@@ -216,7 +216,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	rf.preRPCHandler(args.Term) // update current term, votedFor
+	noNeedToPersist := rf.preRPCHandler(args.Term) // update current term, votedFor
 
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
@@ -247,7 +247,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if isConsistent && reply.VoteGranted { // voting the for the candidate
 		rf.votedFor = args.CandidateId
 		rf.resettingElectionTimer() // resetting the timer
+		noNeedToPersist = false
 	}
+
+	if !noNeedToPersist {
+		rf.persist()
+	}
+
 }
 
 //
@@ -290,9 +296,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
 
-	rf.preRPCHandler(args.Term)
+	noNeedToPersist := rf.preRPCHandler(args.Term)
+
+	if !noNeedToPersist {
+		defer rf.persist()
+	}
 
 	reply.Term = rf.currentTerm
 	reply.Success = true
@@ -343,6 +352,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = Min(args.LeaderCommit, lastNewInd)
+	}
+
+	if noNeedToPersist { // has not called defer persist yet :3 I know the code is ugly, but so am I :v
+		rf.persist()
 	}
 
 	DPrintf("[%d]: Follower\n " +
@@ -545,9 +558,9 @@ func (rf *Raft) kickOffAnElection() {
 			defer rf.mu.Unlock()
 			result++
 
-			needPersist := rf.preRPCHandler(reply.Term) // check whether you had an old term
+			noNeedToPersist := rf.preRPCHandler(reply.Term) // check whether you had an old term
 
-			if !needPersist {
+			if !noNeedToPersist {
 				rf.persist()
 			}
 
