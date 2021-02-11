@@ -18,12 +18,14 @@ package raft
 //
 
 import (
+	"bytes"
 	"math/rand"
 	"sync"
 	"time"
 )
 import "sync/atomic"
 import "../labrpc"
+import "../labgob"
 
 // import "bytes"
 // import "../labgob"
@@ -156,8 +158,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
+	 w := new(bytes.Buffer)
+	 e := labgob.NewEncoder(w)
+	 e.Encode(rf.currentTerm)
+	 e.Encode(rf.votedFor)
+	 e.Encode(rf.log)
+	 data := w.Bytes()
+	 rf.persister.SaveRaftState(data)
 	// e.Encode(rf.xxx)
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
@@ -185,6 +192,20 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm, votedFor int
+	var log []LogEntry
+
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		DPrintf("Error while loading persisted entries!")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 //
@@ -269,6 +290,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	rf.preRPCHandler(args.Term)
 
@@ -373,6 +395,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		})
 		term = rf.currentTerm
 
+		rf.persist()
+
 		DPrintf("[%d] Leader Log right now %v", rf.me, rf.log)
 	} else {
 		//DPrintf("GET-CMD:[%d] non-leader got a new command, discarding it %v", rf.me, command)
@@ -455,10 +479,9 @@ func (rf *Raft) applyDaemon(applyCh chan ApplyMsg) {
 		} else {
 			rf.mu.Unlock()
 		}
-		time.Sleep(30 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
-
 
 func (rf *Raft) electionDaemon() {
 
@@ -498,7 +521,7 @@ func (rf *Raft) kickOffAnElection() {
 		lastLogIndex = len(rf.log) - 1
 		lastLogTerm = rf.log[lastLogIndex].Term
 	}
-
+	rf.persist()
 	rf.mu.Unlock()
 
 	for ind,_ := range rf.peers {
@@ -522,7 +545,11 @@ func (rf *Raft) kickOffAnElection() {
 			defer rf.mu.Unlock()
 			result++
 
-			rf.preRPCHandler(reply.Term) // check whether you had an old term
+			needPersist := rf.preRPCHandler(reply.Term) // check whether you had an old term
+
+			if !needPersist {
+				rf.persist()
+			}
 
 			if rf.currentTerm != askedVoteTerm || rf.state != Candidate {
 				return
@@ -558,6 +585,8 @@ func (rf *Raft) kickOffAnElection() {
 		rf.becomeFollower()
 		DPrintf("[%d] lost the election at term #%d", rf.me, rf.currentTerm)
 	}
+
+	rf.persist()
 }
 
 func (rf *Raft) appendEntriesDaemon() {
@@ -638,6 +667,10 @@ func (rf *Raft) sendHeartBeatToOne(server, term int)  {
 
 		latestTerm := rf.preRPCHandler(reply.Term)
 
+		if !latestTerm {
+			rf.persist()
+		}
+
 		if !latestTerm || term != rf.currentTerm || rf.state != Leader {
 			rf.mu.Unlock()
 			break
@@ -680,7 +713,7 @@ func (rf *Raft) updateLeaderCommitIndex() {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(30* time.Millisecond)
+		time.Sleep(10* time.Millisecond)
 	}
 }
 
